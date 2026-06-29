@@ -1,0 +1,8 @@
+venv/
+__pycache__/
+.env
+saved_models/
+*.pyc
+.DS_Store
+.idea/
+.vscode/
