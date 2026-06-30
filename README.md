@@ -2,351 +2,141 @@
 
 A real-time physiological intelligence system that analyses wearable biometric data to detect circadian misalignment and deliver personalised behavioural interventions (zeitgebers).
 
-Built by Meet Tagadiya for Andrea's Loop Orchestra integration.
+Built by Meet Tagadiya for Loop Orchestra.
 
 ---
 
-## What This System Does
+## How It Works
 
-The platform collects data from wearables (Fitbit, Oura) and a continuous glucose monitor (Freestyle Libre) via the Junction API, analyses the user's biological clock against their social/behavioural clock, and generates personalised time-giver recommendations to reduce circadian disruption.
+Every minute, a background pipeline (`workers/physiology_worker.py`):
 
-**Three layers:**
-1. **Data Ingestion** — Junction API fetches HRV, heart rate, steps, sleep, glucose, and CBT every minute
-2. **Digital Twin** — pipeline computes biological midnight from CBT nadir, misalignment score, fatigue, readiness, and Circadian Stress Index
-3. **Intervention Engine** — rule-based zeitgeber generator that produces personalised messages using real values (actual times, real scores, not generic text)
+1. **Fetches data** from Junction API — HRV, heart rate, steps, sleep, glucose (CGM), and core body temperature from connected wearables (Fitbit, Oura, Freestyle Libre)
+2. **Computes the digital twin** — biological midnight (from CBT nadir), DLMO estimate, misalignment score, fatigue, Circadian Stress Index, and readiness score
+3. **Generates interventions** — personalised zeitgeber recommendations using real numbers (actual times, actual scores), not generic text
+4. **Reads behavioral logs** — meals, exercise, and sleep events logged by the user, to make interventions specific
+5. **Fetches weather** for the user's location to assess natural light exposure
+6. **Saves a snapshot** to the database, auto-cleaned to the last 48 entries per user
+
+The frontend reads only from these saved snapshots via one endpoint — it never calls Junction directly.
+
+---
+
+## Scores — What They Mean
+
+**Biological Midnight** — computed from real core body temperature data (CBT nadir), not estimated.
+
+**DLMO Estimate** — biological_midnight minus 2 hours. Standard clinical approximation (Lewy et al., 1999). Labelled "estimated" in the UI.
+
+**Misalignment Score** — gap in hours between biological sleep time and actual logged sleep time.
+
+**Fatigue (1–5)** — transparent HRV-based formula, no ML model. Higher HRV = lower fatigue, with modifiers for misalignment and sleep consistency.
+
+**Circadian Stress Index (0–100)** — misalignment 50% + fatigue 30% + glucose variability 20%, weights based on published circadian research (Roenneberg 2012, Firstbeat 2014, Scheer 2009).
+
+**Readiness Score (0–100)** — HRV 55% + sleep quality 28% + adherence 17%, based on Oura's validation methodology and published sleep research.
 
 ---
 
 ## Project Structure
 
 ```
-Circadian/
-├── backend/                        # FastAPI backend
-│   ├── main.py                     # App entry point, router registration
-│   ├── workers/
-│   │   └── physiology_worker.py    # Core pipeline — runs every minute
-│   ├── app/
-│   │   ├── analytics/
-│   │   │   ├── digital_twin_engine.py    # Biological midnight, DLMO, misalignment
-│   │   │   ├── risk_engine.py            # Circadian Stress Index (0-100)
-│   │   │   └── adherence_engine.py       # Behavioural adherence scoring
-│   │   ├── interventions/
-│   │   │   ├── circadian_interventions.py  # Zeitgeber generation
-│   │   │   └── contextual_engine.py        # Meal/exercise timing analysis
-│   │   ├── api/
-│   │   │   ├── dashboard_summary.py  # Main frontend API endpoint
-│   │   │   ├── readiness_score.py    # HRV-based readiness (evidence-based weights)
-│   │   │   ├── behavior_logger.py    # Meal/exercise/sleep logging
-│   │   │   └── ...
-│   │   ├── ingestion/
-│   │   │   └── junction_fetcher.py   # Junction API calls
-│   │   └── environment/
-│   │       └── light_cycle.py        # OpenWeather — reads lat/lon from user_locations table
-│   ├── saved_models/               # Not used — ML model replaced with transparent formula
-│   ├── requirements.txt
-│   └── .env                        # Secret credentials — never commit this
-│
-└── circadian-v2/                   # Nuxt.js frontend
-    ├── pages/circadian/
-    │   ├── index.vue               # Dashboard
-    │   ├── timeline.vue            # 24h biological clock view
-    │   ├── interventions.vue       # Zeitgebers + behavioral logging
-    │   └── trends.vue              # Longitudinal analysis
-    ├── layouts/default.vue         # Sidebar + topbar layout
-    ├── plugins/user-store.js       # User state management
-    └── nuxt.config.js
+backend/
+├── main.py                      # FastAPI app, routers, scheduler startup
+├── workers/physiology_worker.py # Core pipeline — runs every 1 minute
+├── app/
+│   ├── analytics/                # Scoring engines (digital twin, risk, adherence)
+│   ├── interventions/            # Zeitgeber generation logic
+│   ├── ingestion/                # Junction API calls
+│   ├── physiology/                # Biological clock calculations
+│   ├── environment/               # Weather + light exposure
+│   ├── behaviour/                  # Meal/exercise timing analysis
+│   ├── api/                        # All HTTP endpoints
+│   └── database/supabase_client.py
+├── .env                          # Credentials — sent separately, never in git
+└── requirements.txt
+
+circadian-v2/                     # Nuxt.js frontend
+├── pages/circadian/
+│   ├── index.vue                 # Dashboard
+│   ├── timeline.vue               # 24h biological clock, DLMO, CBT
+│   ├── interventions.vue          # Zeitgebers + activity logging
+│   └── trends.vue                 # Longitudinal trends
+├── layouts/default.vue
+└── nuxt.config.js
 ```
 
 ---
 
-## Local Setup — Backend
+## Running Locally
 
-### Requirements
-- Python 3.10+
-- pip
-
-### Install
+### Backend
 
 ```bash
 cd backend
 python -m venv venv
-
-# Windows
-venv\Scripts\activate
-
-# Mac/Linux
-source venv/bin/activate
+venv\Scripts\activate          # Windows
+source venv/bin/activate       # Mac/Linux
 
 pip install -r requirements.txt
 ```
 
-### Environment Variables
-
-Copy `.env.example` to `.env` and fill in your values:
-
-```bash
-cp .env.example .env
-```
-
-```env
-# Junction API (wearable data)
-VITAL_BASE_URL=https://api.sandbox.eu.junction.com   # sandbox
-# VITAL_BASE_URL=https://api.eu.junction.com         # production (real users)
-VITAL_API_KEY=your_junction_api_key
-
-# OpenWeather (environmental context)
-OPENWEATHER_API_KEY=your_openweather_key
-
-# Supabase (database)
-SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_KEY=your_supabase_publishable_key
-
-# CORS — set to your frontend domain in production
-FRONTEND_URL=http://localhost:3000
-```
-
-### Run
+You'll receive a `.env` file separately with the working credentials — place it in the `backend` folder. Then:
 
 ```bash
 uvicorn main:app --reload
 ```
 
-Backend runs on `http://localhost:8000`
+Backend runs at `http://localhost:8000`. Check `/health` for pipeline status.
 
-Health check: `http://localhost:8000/health` — shows pipeline status and last run time.
-
-API docs: `http://localhost:8000/docs`
-
----
-
-## Local Setup — Frontend
-
-### Requirements
-- Node.js 16+
-
-### Install
+### Frontend
 
 ```bash
 cd circadian-v2
 npm install
-```
-
-### Environment Variables
-
-Create `.env` in the `circadian-v2` folder:
-
-```env
-CIRCADIAN_API_URL=http://localhost:8000
-```
-
-### Run
-
-```bash
 npm run dev
 ```
 
-Frontend runs on `http://localhost:3000`
+Frontend runs at `http://localhost:3000`. Set `CIRCADIAN_API_URL` in `circadian-v2/.env` to point at the backend.
 
 ---
 
-## Supabase Database
+## Switching from Sandbox to Real Wearable Data
 
-### Tables
-
-| Table | Purpose |
-|---|---|
-| `users` | One row per user. Columns: `id`, `vital_user_id`, `chronotype`, `created_at` |
-| `user_provider_connections` | Maps app user to Junction provider. Columns: `user_id`, `provider`, `provider_user_id` |
-| `user_locations` | Per-user lat/lon for weather API. Columns: `user_id`, `latitude`, `longitude` |
-| `physiological_data` | HRV, CBT, resting heart rate timeseries from wearables |
-| `digital_twin_snapshots` | Pipeline output — one snapshot per run per user. Auto-cleaned to last 48 |
-| `behavioral_logs` | User-logged meals, exercise, sleep onset |
-| `biochemical_data` | Glucose data storage |
-| `notification_delivery_log` | Tracks which notifications were already sent |
-
-### Adding a New User (manual process — see Auth section below)
-
-```sql
--- 1. Insert user row
-INSERT INTO users (id, vital_user_id, chronotype)
-VALUES ('your-uuid', 'junction-provider-user-id', 'intermediate');
-
--- 2. Insert provider connection
-INSERT INTO user_provider_connections (user_id, provider, provider_user_id)
-VALUES ('your-uuid', 'junction', 'junction-provider-user-id');
-
--- 3. Insert location (for weather)
-INSERT INTO user_locations (user_id, latitude, longitude)
-VALUES ('your-uuid', 45.4064, 11.8768);
-```
-
----
-
-## How the Pipeline Works
-
-The physiology pipeline runs automatically every minute via APScheduler:
-
-```
-1. Read all users from Supabase users table
-2. For each user:
-   a. Fetch activity + sleep summary from Junction
-   b. Fetch HRV, heart rate, steps, glucose timeseries from Junction
-   c. Read physiological_data rows to compute biological midnight (CBT nadir)
-   d. Compute DLMO estimate (biological_midnight - 2h)
-   e. Calculate misalignment score (biological vs social clock)
-   f. Compute fatigue from HRV (transparent formula, no ML)
-   g. Calculate Circadian Stress Index
-   h. Calculate readiness score (evidence-based weights)
-   i. Generate personalised zeitgeber interventions
-   j. Read behavioral_logs for meal/exercise timing analysis
-   k. Fetch weather for user's location
-   l. Save digital_twin_snapshot to Supabase
-3. Auto-cleanup: keep only last 48 snapshots per user
-```
-
-The frontend reads only from `digital_twin_snapshots` via the `/dashboard-summary` API — it never calls Junction directly.
-
----
-
-## Switching from Sandbox to Production
-
-Change one line in `.env`:
+One line in `.env`:
 
 ```env
-# Sandbox (synthetic data, for development):
+# Sandbox (synthetic test data):
 VITAL_BASE_URL=https://api.sandbox.eu.junction.com
 
-# Production (real user wearables):
+# Production (real connected wearables):
 VITAL_BASE_URL=https://api.eu.junction.com
 ```
 
-Everything else stays identical.
+Everything else in the codebase stays identical.
 
 ---
 
-## Scores — What They Mean and How They're Calculated
+## What Still Needs to Be Built
 
-### Biological Midnight
-Computed from the CBT (core body temperature) nadir in `physiological_data`. The lowest smoothed temperature point minus 2 hours. Source: published circadian physiology.
+**Authentication** — the API currently has no login system; any request with a `user_id` returns that user's data. Recommended approach: Supabase Auth, with a JWT sent on every request and verified by FastAPI middleware.
 
-### DLMO Estimate
-Dim Light Melatonin Onset ≈ biological_midnight - 2h. Standard clinical approximation (Lewy et al., 1999). Labelled "estimated" in the UI.
+**User onboarding** — users are currently added manually in the database. For real users, build a signup flow that creates a Junction user and walks them through connecting their wearable (Junction's hosted Link flow). The webhook endpoint that receives the connection confirmation already exists and works (`/junction-webhook`) — only the frontend onboarding screens are missing.
 
-### Misalignment Score (hours)
-Gap between biological sleep midpoint and actual sleep time from behavioral logs. When behavioral logs are empty, falls back to a variability proxy from sleep consistency.
+**CORS** — set `FRONTEND_URL` in `.env` to the production frontend domain.
 
-### Circadian Stress Index (0-100)
-Replaces "Risk Score". Weighted composite:
-- Misalignment: 50% (Roenneberg et al., 2012)
-- HRV-derived fatigue: 30% (Firstbeat Technologies, 2014)
-- Glucose variability: 20% (Scheer et al., 2009)
-
-### Readiness Score (0-100)
-- HRV: 55% (Oura validation study, Koskimäki et al., 2018)
-- Sleep quality (consistency + fatigue): 28% (Phillips et al., 2017)
-- Behavioural adherence: 17% (Baron & Reid, 2014)
-
-### Fatigue Prediction (1-5)
-Transparent HRV-based formula — no ML model:
-- HRV > 50ms = fatigue 1 (low)
-- HRV 35-50ms = fatigue 2
-- HRV 20-35ms = fatigue 3
-- HRV 10-20ms = fatigue 4
-- HRV < 10ms = fatigue 5
-- +1 if misalignment > 3h
-- +1 if sleep consistency < 40%
+**Pipeline as standalone process** — currently the pipeline runs inside the FastAPI app via APScheduler. For production stability it's better run as a separate worker process so it survives API restarts.
 
 ---
 
-## What Luigi Needs to Build for Production
+## Known Limitations
 
-### 1. Authentication (Required — high priority)
-The API is currently open. Any request with a valid `user_id` returns that user's health data.
-
-**Recommended approach:** Supabase Auth
-- Add Supabase Auth to the frontend (email/password or OAuth)
-- Frontend sends JWT token with every API request
-- Add FastAPI middleware to verify JWT on every endpoint
-- Replace hardcoded `user_id` in frontend with the authenticated user's ID from the token
-
-Supabase Auth is already available in the Supabase project — no new service needed.
-
-### 2. User Onboarding Flow (Required for real users)
-Currently users are added manually via SQL. For real users:
-
-1. User signs up → Supabase Auth creates account
-2. Backend creates a Junction user via `POST /v2/user`
-3. Frontend redirects user to Junction Link flow to connect their wearable
-4. Junction sends a webhook to `/junction-webhook` when connection succeeds
-5. Backend stores `provider_user_id` in `user_provider_connections`
-6. Pipeline automatically picks up new user on next run
-
-The webhook endpoint (`/junction-webhook`) already exists. Steps 2-3 need a frontend onboarding screen.
-
-### 3. Location Collection
-When a new user registers, collect their location (or use browser geolocation API) and save to `user_locations` table. The weather/light cycle data is per-user and already reads from this table.
-
-### 4. Pipeline as Standalone Worker (Recommended for production)
-Currently the pipeline runs inside the FastAPI app. For production stability, separate it:
-
-```bash
-# Run pipeline independently
-python workers/physiology_worker.py
-```
-
-Or use a cron job / Celery worker. This way the pipeline keeps running even if the API restarts.
-
-### 5. CORS Configuration
-Set `FRONTEND_URL` in `.env` to Loop Orchestra's domain:
-
-```env
-FRONTEND_URL=https://looportchestra.com
-```
-
----
-
-## API Endpoints Used by Frontend
-
-| Endpoint | Method | Description |
-|---|---|---|
-| `/dashboard-summary?user_id=` | GET | Main data endpoint — returns all dashboard data |
-| `/log-behavior` | POST | Log meal, exercise, or sleep event |
-| `/behavior-logs?user_id=` | GET | Recent behavioral logs |
-| `/health` | GET | Pipeline health status |
-
-All other endpoints exist for debugging and internal use.
-
----
-
-## Known Limitations (V1)
-
-| Limitation | Notes |
-|---|---|
-| No authentication | See Luigi's tasks above |
-| No user onboarding UI | Users added manually via SQL |
-| Environmental light is from OpenWeather | Not from phone sensor — good proxy but not direct measurement |
-| DLMO is estimated, not measured | Clinical approximation, labelled "est." in UI |
-| Behavioral logs require manual input | No automatic detection of meals/exercise |
-| Sandbox data is synthetic | Junction sandbox generates the same dataset for all demo users |
-| No error alerting | Check `/health` endpoint; pipeline logs to stdout |
+- Environmental light is estimated from weather data (OpenWeather), not measured from a phone sensor
+- DLMO is a clinical approximation, not directly measured
+- Behavioral logging is manual — no automatic detection of meals or exercise
+- Sandbox wearable data is synthetic and similar across demo users; real connected devices will produce more varied results
 
 ---
 
 ## Tech Stack
 
-| Component | Technology |
-|---|---|
-| Backend | Python 3.10, FastAPI, APScheduler |
-| Database | Supabase (PostgreSQL) |
-| Wearable data | Junction API (Vital) |
-| Glucose data | Freestyle Libre via Junction |
-| Weather | OpenWeather API |
-| Frontend | Nuxt.js 2, Tailwind CSS |
-| Deployment | Any Python host (Railway, Render, Heroku) + Vercel/Netlify for frontend |
-
----
-
-## Contact
-
-Built by Meet Tagadiya — University of Padua  
-For integration questions: hand off to Luigi with this README and the `.env` values separately (never in the repo).
+Python 3.10 / FastAPI / APScheduler · Supabase (PostgreSQL) · Junction API (Fitbit, Oura, Freestyle Libre) · OpenWeather · Nuxt.js 2 / Tailwind CSS
